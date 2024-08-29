@@ -1,0 +1,5 @@
+http://images.cocodataset.org/annotations/annotations_trainval2017.zip
+
+git lfs install
+git clone https://huggingface.co/openai/clip-vit-base-patch32
+GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/openai/clip-vit-base-patch32
