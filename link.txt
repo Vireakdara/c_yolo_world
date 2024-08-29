@@ -3,3 +3,11 @@ http://images.cocodataset.org/annotations/annotations_trainval2017.zip
 git lfs install
 git clone https://huggingface.co/openai/clip-vit-base-patch32
 GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/openai/clip-vit-base-patch32
+
+
+configs/finetune_coco/yolo_world_v2_l_vlpan_bn_sgd_1e-3_40e_8gpus_finetune_coco.py
+
+yoloworld：https://hf-mirror.com/wondervictor/YOLO-World
+clip-vit-base-patch32：https://hf-mirror.com/openai/clip-vit-base-patch32
+
+python tools/train.py configs/finetune_coco/yolo_world_v2_l_vlpan_bn_sgd_1e-3_40e_8gpus_finetune_coco.py --work-dir log --amp --resume
