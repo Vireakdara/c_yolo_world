@@ -9,8 +9,9 @@ from mmyolo.registry import MODELS
 from mmdet.utils import OptMultiConfig, ConfigType
 from transformers import (AutoTokenizer, AutoModel, CLIPTextConfig, AutoModelForMaskedLM)
 from transformers import CLIPTextModelWithProjection as CLIPTP
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, BeitConfig, BeitModel, XLMRobertaTokenizer
 from typing import List, Sequence
+
 
 @MODELS.register_module()
 class HuggingVisionBackbone(BaseModule):
@@ -304,7 +305,7 @@ class HuggingSBERTLanguageBackbone(nn.Module):
 @MODELS.register_module()
 class HuggingBEiT3LanguageBackbone(nn.Module):
     def __init__(self,
-                 model_name: str = 'microsoft/beit-base-patch16-224-pt22k',
+                 model_name: str = 'microsoft/beit-large-patch16-224', 
                  frozen_modules: Sequence[str] = (),
                  dropout: float = 0.0,
                  training_use_cache: bool = False) -> None:
@@ -369,6 +370,71 @@ class HuggingBEiT3LanguageBackbone(nn.Module):
         for name, module in self.model.named_modules():
             for frozen_name in self.frozen_modules:
                 if name.startswith(frozen_name):
+                    for param in module.parameters():
+                        param.requires_grad = False
+                    break
+
+    def train(self, mode=True):
+        super().train(mode)
+        self._freeze_modules()
+
+## HuggingBeitImageBackbone MODEL TEST IN PROGRESS
+@MODELS.register_module()
+class HuggingBeitImageBackbone(nn.Module):
+    
+    def __init__(self,
+                 model_name: str,
+                 frozen_modules: Sequence[str] = (),
+                 dropout: float = 0.0,
+                 training_use_cache: bool = False) -> None:
+        
+        super().__init__()
+        
+        self.frozen_modules = frozen_modules
+        self.training_use_cache = training_use_cache
+        self.tokenizer = XLMRobertaTokenizer("D:\\YOLO\\YOLO-World\\beit-large-patch16-224\\beit3.spm")
+        
+        # Set up the BEiT configuration with dropout adjustments
+        beit_config = BeitConfig.from_pretrained(model_name)
+        beit_config.hidden_dropout_prob = dropout
+        self.model = BeitModel.from_pretrained(model_name, config=beit_config)
+        
+        # Freeze specified modules if any
+        self._freeze_modules()
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for image embeddings using BEiT.
+        
+        Args:
+            images (torch.Tensor): Batch of images in tensor format.
+            
+        Returns:
+            torch.Tensor: Image embeddings after normalization.
+        """
+        img_outputs = self.model(images)
+        img_feats = img_outputs.last_hidden_state.mean(dim=1)  # Global average pooling
+        img_feats = img_feats / img_feats.norm(p=2, dim=-1, keepdim=True)  # L2 normalization
+        return img_feats
+
+    def _freeze_modules(self):
+        """
+        Freeze specified modules of the model to save computation and memory.
+        """
+        if len(self.frozen_modules) == 0:
+            # No modules to freeze
+            return
+        if self.frozen_modules[0] == "all":
+            self.model.eval()
+            for _, module in self.model.named_modules():
+                module.eval()
+                for param in module.parameters():
+                    param.requires_grad = False
+            return
+        for name, module in self.model.named_modules():
+            for frozen_name in self.frozen_modules:
+                if name.startswith(frozen_name):
+                    module.eval()
                     for param in module.parameters():
                         param.requires_grad = False
                     break
