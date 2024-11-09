@@ -91,8 +91,12 @@ class HuggingCLIPLanguageBackbone(BaseModule):
             'number of sequences not equal in batch')
         text = list(itertools.chain(*text))
         text = self.tokenizer(text=text, return_tensors='pt', padding=True)
+        # print("Text1 >>>>>>>>", text)
+
         text = text.to(device=self.model.device)
+        # print("Text2 >>>>>>>>", text)
         txt_outputs = self.model(**text)
+        return;
         txt_feats = txt_outputs.text_embeds
         txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
         txt_feats = txt_feats.reshape(-1, num_per_batch[0],
@@ -381,13 +385,11 @@ class HuggingBEiT3LanguageBackbone(nn.Module):
 ## HuggingBeitImageBackbone MODEL TEST IN PROGRESS
 @MODELS.register_module()
 class HuggingBeitImageBackbone(nn.Module):
-    
     def __init__(self,
                  model_name: str,
                  frozen_modules: Sequence[str] = (),
                  dropout: float = 0.0,
                  training_use_cache: bool = False) -> None:
-        
         super().__init__()
         
         self.frozen_modules = frozen_modules
@@ -399,46 +401,63 @@ class HuggingBeitImageBackbone(nn.Module):
         beit_config.hidden_dropout_prob = dropout
         self.model = BeitModel.from_pretrained(model_name, config=beit_config)
         
-        # Freeze specified modules if any
+        # Apply dropout settings if necessary
+        if hasattr(self.model.config, 'attention_probs_dropout_prob'):
+            self.model.config.attention_probs_dropout_prob = dropout
+        if hasattr(self.model.config, 'hidden_dropout_prob'):
+            self.model.config.hidden_dropout_prob = dropout
+
+        # Freeze specified layers if needed
         self._freeze_modules()
 
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass for image embeddings using BEiT.
+    def forward_tokenizer(self, texts: List[str]):
+        # Tokenizes input texts; cache based on training_use_cache flag
+        if self.training_use_cache and not hasattr(self, 'text'):
+            text = list(itertools.chain(*texts))
+            text = self.tokenizer(text=text, return_tensors='pt', padding=True, truncation=True)
+            self.text = text.to(device=self.model.device)
+        return self.text if self.training_use_cache else self.tokenizer(text=texts, return_tensors='pt', padding=True, truncation=True).to(self.model.device)
+   
+    def forward(self, text: List[List[str]]) -> Tensor:
+        # Check consistency in batch dimensions
+        num_per_batch = [len(t) for t in text]
+        assert max(num_per_batch) == min(num_per_batch), 'Inconsistent batch sizes'
         
-        Args:
-            images (torch.Tensor): Batch of images in tensor format.
-            
-        Returns:
-            torch.Tensor: Image embeddings after normalization.
-        """
-        img_outputs = self.model(images)
-        img_feats = img_outputs.last_hidden_state.mean(dim=1)  # Global average pooling
-        img_feats = img_feats / img_feats.norm(p=2, dim=-1, keepdim=True)  # L2 normalization
-        return img_feats
+        # Flatten, tokenize, and move to device
+        text = list(itertools.chain(*text))
+        text = self.tokenizer(text=text, return_tensors='pt', padding=True, truncation=True).to(self.model.device)
+        text = text.to(device=self.model.device)
+        # Forward pass through BEiT text encoder
+        # print("Text >>>>>", text)
+        outputs = self.model(**text)
+  
+        # Get embeddings, apply pooling
+        txt_feats = outputs.last_hidden_state.mean(dim=1)  # Mean pooling
+        
+        # Normalize embeddings for contrastive tasks
+        txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
+        
+        # Reshape to match input batch structure
+        txt_feats = txt_feats.reshape(-1, num_per_batch[0], txt_feats.shape[-1])
+        return txt_feats
 
     def _freeze_modules(self):
-        """
-        Freeze specified modules of the model to save computation and memory.
-        """
+        # Freezes specified layers of the BEiT model
         if len(self.frozen_modules) == 0:
-            # No modules to freeze
             return
+        
         if self.frozen_modules[0] == "all":
-            self.model.eval()
-            for _, module in self.model.named_modules():
-                module.eval()
-                for param in module.parameters():
-                    param.requires_grad = False
+            for param in self.model.parameters():
+                param.requires_grad = False
             return
+
         for name, module in self.model.named_modules():
             for frozen_name in self.frozen_modules:
                 if name.startswith(frozen_name):
-                    module.eval()
                     for param in module.parameters():
                         param.requires_grad = False
                     break
 
     def train(self, mode=True):
         super().train(mode)
-        self._freeze_modules()
+        self._freeze_modules()  # Re-apply module freezing on train toggle
