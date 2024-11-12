@@ -7,7 +7,7 @@ from torch.nn.modules.batchnorm import _BatchNorm
 from mmengine.model import BaseModule
 from mmyolo.registry import MODELS
 from mmdet.utils import OptMultiConfig, ConfigType
-from transformers import (AutoTokenizer, AutoModel, CLIPTextConfig, AutoModelForMaskedLM)
+from transformers import (AutoTokenizer, AutoModel, CLIPTextConfig, AutoModelForMaskedLM, AutoTokenizer, CLIPTextModel, RobertaModel)
 from transformers import CLIPTextModelWithProjection as CLIPTP
 from transformers import AutoTokenizer, AutoModel, BeitConfig, BeitModel, XLMRobertaTokenizer
 from typing import List, Sequence
@@ -96,7 +96,6 @@ class HuggingCLIPLanguageBackbone(BaseModule):
         text = text.to(device=self.model.device)
         # print("Text2 >>>>>>>>", text)
         txt_outputs = self.model(**text)
-        return;
         txt_feats = txt_outputs.text_embeds
         txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
         txt_feats = txt_feats.reshape(-1, num_per_batch[0],
@@ -127,6 +126,103 @@ class HuggingCLIPLanguageBackbone(BaseModule):
         super().train(mode)
         self._freeze_modules()
 
+@MODELS.register_module()
+class EnhancedTextCLIPBackbone(BaseModule):
+    def __init__(self,
+                model_name: str,
+                frozen_modules: Sequence[str] = (),
+                enhanced_text_model_name: str = "D:\\YOLO\\YOLO-World\\roberta-base",
+                dropout: float = 0.0,
+                training_use_cache: bool = False,
+                init_cfg: OptMultiConfig = None) -> None:
+        super().__init__(init_cfg=init_cfg)
+
+        self.frozen_modules = frozen_modules
+        self.training_use_cache = training_use_cache
+        
+        # Initialize CLIP Text Model
+        self.clip_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        clip_config = CLIPTextConfig.from_pretrained(model_name, attention_dropout=dropout)
+        self.clip_text_model = CLIPTextModel.from_pretrained(model_name, config=clip_config)
+
+        # Initialize RoBERTa as Enhanced Text Encoder
+        self.enhanced_tokenizer = AutoTokenizer.from_pretrained(enhanced_text_model_name)
+        self.enhanced_text_model = RobertaModel.from_pretrained(enhanced_text_model_name)
+
+        # Fusion Layer to combine CLIP and RoBERTa Embeddings
+        self.fusion_layer = nn.Linear(
+            self.clip_text_model.config.hidden_size + self.enhanced_text_model.config.hidden_size,
+            self.clip_text_model.config.hidden_size
+        )
+        self._freeze_modules()
+
+    def forward_tokenizer(self, texts: List[List[str]]):
+        # Tokenize text for both CLIP and RoBERTa
+        flat_text = list(itertools.chain(*texts))
+        clip_tokens = self.clip_tokenizer(text=flat_text, return_tensors='pt', padding=True)
+        enhanced_tokens = self.enhanced_tokenizer(text=flat_text, return_tensors='pt', padding=True)
+        return clip_tokens.to(self.clip_text_model.device), enhanced_tokens.to(self.enhanced_text_model.device)
+
+    def forward(self, text: List[List[str]]) -> Tensor:
+        # Process text with both CLIP and RoBERTa
+        num_per_batch = [len(t) for t in text]
+        assert max(num_per_batch) == min(num_per_batch), "Batch sequence lengths must match"
+        
+        clip_tokens, enhanced_tokens = self.forward_tokenizer(text)
+        
+        # CLIP Text Embeddings
+        clip_outputs = self.clip_text_model(**clip_tokens)
+        clip_embeds = clip_outputs.last_hidden_state[:, 0, :]  # CLS token embedding for CLIP
+        clip_embeds = clip_embeds / clip_embeds.norm(p=2, dim=-1, keepdim=True)
+
+        # RoBERTa Text Embeddings
+        enhanced_outputs = self.enhanced_text_model(**enhanced_tokens)
+        enhanced_embeds = enhanced_outputs.last_hidden_state[:, 0, :]  # CLS token embedding for RoBERTa
+        enhanced_embeds = enhanced_embeds / enhanced_embeds.norm(p=2, dim=-1, keepdim=True)
+
+        # Concatenate and fuse embeddings
+        combined_embeds = torch.cat([clip_embeds, enhanced_embeds], dim=-1)
+        fused_embeds = self.fusion_layer(combined_embeds)
+        fused_embeds = fused_embeds.reshape(-1, num_per_batch[0], fused_embeds.shape[-1])
+        
+        return fused_embeds
+    
+    def _freeze_modules(self):
+        if len(self.frozen_modules) == 0:
+            # No modules to freeze
+            return
+
+        # Freeze all modules if "all" is specified
+        if self.frozen_modules[0] == "all":
+            # Freeze CLIP text model
+            self.clip_text_model.eval()
+            for _, module in self.clip_text_model.named_modules():
+                for param in module.parameters():
+                    param.requires_grad = False
+
+            # Freeze RoBERTa enhanced text model
+            self.enhanced_text_model.eval()
+            for _, module in self.enhanced_text_model.named_modules():
+                for param in module.parameters():
+                    param.requires_grad = False
+            return
+
+        # Freeze specified modules
+        for name, module in self.clip_text_model.named_modules():
+            for frozen_name in self.frozen_modules:
+                if name.startswith(frozen_name):
+                    module.eval()
+                    for param in module.parameters():
+                        param.requires_grad = False
+                    break
+
+        for name, module in self.enhanced_text_model.named_modules():
+            for frozen_name in self.frozen_modules:
+                if name.startswith(frozen_name):
+                    module.eval()
+                    for param in module.parameters():
+                        param.requires_grad = False
+                    break
 
 @MODELS.register_module()
 class PseudoLanguageBackbone(BaseModule):
@@ -428,7 +524,7 @@ class HuggingBeitImageBackbone(nn.Module):
         text = self.tokenizer(text=text, return_tensors='pt', padding=True, truncation=True).to(self.model.device)
         text = text.to(device=self.model.device)
         # Forward pass through BEiT text encoder
-        # print("Text >>>>>", text)
+        print("Text >>>>>", text)
         outputs = self.model(**text)
   
         # Get embeddings, apply pooling
