@@ -15,4 +15,6 @@ git clone https://huggingface.co/microsoft/beit-base-patch16-224
 https://github.com/addf400/files/releases/download/beit3/beit3.spm
 pip install simpletransformers
 
+ git clone https://huggingface.co/FacebookAI/roberta-base
+
 python tools/train.py configs/finetune_coco/yolo_world_v2_l_vlpan_bn_sgd_1e-3_40e_8gpus_finetune_coco.py --work-dir log --amp --resume
