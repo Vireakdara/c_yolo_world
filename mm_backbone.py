@@ -225,6 +225,93 @@ class EnhancedTextCLIPBackbone(BaseModule):
                     break
 
 @MODELS.register_module()
+class EnhancedTextCLIPBackboneV2(BaseModule):
+    def __init__(self,
+                model_name: str,
+                frozen_modules: Sequence[str] = (),
+                enhanced_text_model_name: str = "D:\\YOLO\\YOLO-World\\beit-large-patch16-224",
+                dropout: float = 0.0,
+                training_use_cache: bool = False,
+                init_cfg: OptMultiConfig = None) -> None:
+        super().__init__(init_cfg=init_cfg)
+
+        self.frozen_modules = frozen_modules
+        self.training_use_cache = training_use_cache
+        
+        # Initialize CLIP Text Model
+        self.clip_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        clip_config = CLIPTextConfig.from_pretrained(model_name, attention_dropout=dropout)
+        self.clip_text_model = CLIPTextModel.from_pretrained(model_name, config=clip_config)
+
+        # Initialize BEiT as Enhanced Text Encoder
+        self.enhanced_tokenizer = XLMRobertaTokenizer("D:\\YOLO\\YOLO-World\\beit-large-patch16-224\\beit3.spm")
+        self.enhanced_text_model = BeitModel.from_pretrained(enhanced_text_model_name)
+
+        # Fusion Layer to combine CLIP and BEiT Embeddings
+        self.fusion_layer = nn.Linear(
+            self.clip_text_model.config.hidden_size + self.enhanced_text_model.config.hidden_size,
+            self.clip_text_model.config.hidden_size
+        )
+        self._freeze_modules()
+
+    def forward_tokenizer(self, texts: List[List[str]]):
+        # Tokenize text for both CLIP and BEiT
+        flat_text = list(itertools.chain(*texts))
+        clip_tokens = self.clip_tokenizer(text=flat_text, return_tensors='pt', padding=True)
+        enhanced_tokens = self.enhanced_tokenizer(text=flat_text, return_tensors='pt', padding=True)
+        return clip_tokens.to(self.clip_text_model.device), enhanced_tokens.to(self.enhanced_text_model.device)
+
+    def forward(self, text: List[List[str]]) -> torch.Tensor:
+        # Process text with both CLIP and BEiT
+        num_per_batch = [len(t) for t in text]
+        assert max(num_per_batch) == min(num_per_batch), "Batch sequence lengths must match"
+        
+        clip_tokens, enhanced_tokens = self.forward_tokenizer(text)
+        
+        # CLIP Text Embeddings
+        clip_outputs = self.clip_text_model(**clip_tokens)
+        clip_embeds = clip_outputs.last_hidden_state[:, 0, :]  # CLS token embedding for CLIP
+        clip_embeds = clip_embeds / clip_embeds.norm(p=2, dim=-1, keepdim=True)
+
+        # BEiT Text Embeddings
+        enhanced_outputs = self.enhanced_text_model(**enhanced_tokens)
+        enhanced_embeds = enhanced_outputs.last_hidden_state[:, 0, :]  # CLS token embedding for BEiT
+        enhanced_embeds = enhanced_embeds / enhanced_embeds.norm(p=2, dim=-1, keepdim=True)
+
+        # Concatenate and fuse embeddings
+        combined_embeds = torch.cat([clip_embeds, enhanced_embeds], dim=-1)
+        fused_embeds = self.fusion_layer(combined_embeds)
+        fused_embeds = fused_embeds.reshape(-1, num_per_batch[0], fused_embeds.shape[-1])
+        
+        return fused_embeds
+    
+    def _freeze_modules(self):
+        if len(self.frozen_modules) == 0:
+            # No modules to freeze
+            return
+        
+        if "all" in self.frozen_modules:
+            # Freeze all parameters
+            for param in self.clip_text_model.parameters():
+                param.requires_grad = False
+            for param in self.enhanced_text_model.parameters():
+                param.requires_grad = False
+        else:
+            # Freeze specific submodules
+            for name, module in self.clip_text_model.named_modules():
+                if any(name.startswith(fm) for fm in self.frozen_modules):
+                    for param in module.parameters():
+                        param.requires_grad = False
+            for name, module in self.enhanced_text_model.named_modules():
+                if any(name.startswith(fm) for fm in self.frozen_modules):
+                    for param in module.parameters():
+                        param.requires_grad = False
+
+    def train(self, mode=True):
+        super().train(mode)
+        self._freeze_modules()
+
+@MODELS.register_module()
 class PseudoLanguageBackbone(BaseModule):
     """Pseudo Language Backbone
     Args:
@@ -418,7 +505,7 @@ class HuggingBEiT3LanguageBackbone(nn.Module):
         self.model = AutoModelForMaskedLM.from_pretrained(model_name)
         
         # Apply dropout settings if necessary (BEiT-3 may use specific configuration parameters)
-        if hasattr(self.model.config, 'attention_probs_dropout_prob'):
+        if hasattr(self.model.config, 'attention_probs_dropout_prob'):  
             self.model.config.attention_probs_dropout_prob = dropout
         if hasattr(self.model.config, 'hidden_dropout_prob'):
             self.model.config.hidden_dropout_prob = dropout
