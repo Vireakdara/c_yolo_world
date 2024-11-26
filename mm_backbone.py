@@ -132,24 +132,19 @@ class HuggingALIGNLanguageBackbone(BaseModule):
                  model_name: str,
                  frozen_modules: Sequence[str] = (),
                  dropout: float = 0.0,
-                 training_use_cache: bool = False,
-                 init_cfg: OptMultiConfig = None) -> None:
-        super().__init__(init_cfg=init_cfg)
+                 target_hidden_size: int = 512,  # Adjust for downstream task
+                 training_use_cache: bool = False) -> None:
+        super().__init__()
 
         self.frozen_modules = frozen_modules
         self.training_use_cache = training_use_cache
         
-        # self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        # clip_config = CLIPTextConfig.from_pretrained(model_name,
-        #                                              attention_dropout=dropout)
-        # self.model = CLIPTP.from_pretrained(model_name, config=clip_config)
-        # self._freeze_modules()
-
         # Initialize ALIGN Tokenizer and Model (Assuming ALIGN model supports text input)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        align_config = AlignTextConfig.from_pretrained(model_name,
+        self.config = AlignTextConfig.from_pretrained(model_name,
                                                       attention_dropout=dropout)
-        self.model = AlignTextModel.from_pretrained(model_name, config=align_config)
+        self.model = AlignTextModel.from_pretrained(        model_name,
+            config=self.config,)
 
         # Fusion layer to combine the embeddings from the model
         self.fusion_layer = nn.Linear(
@@ -158,35 +153,53 @@ class HuggingALIGNLanguageBackbone(BaseModule):
         )
         self._freeze_modules()
 
+        # Add a projection layer if hidden size needs adjustment
+        self.projection = nn.Linear(self.config.hidden_size, target_hidden_size)
+
+        # Optional fusion layer for specific downstream tasks
+        self.fusion_layer = nn.Linear(target_hidden_size, target_hidden_size)
+
+        # Freezing specific modules
+        self._freeze_modules()
+
     def forward_tokenizer(self, texts: List[List[str]]):
-        """Tokenizes the input text using the ALIGN tokenizer."""
+        """Tokenizes input text using ALIGN tokenizer."""
         flat_text = list(itertools.chain(*texts))
         tokens = self.tokenizer(
             text=flat_text,
-            return_tensors='pt',
+            return_tensors="pt",
             padding=True,
             truncation=True,
-            max_length=512  # Adjust as per memory constraints
+            max_length=512
         )
         return tokens.to(self.model.device)
 
     def forward(self, text: List[List[str]]) -> Tensor:
-        """Encodes the text using ALIGN and extracts embeddings."""
+        """Encodes text using ALIGN and processes embeddings."""
         num_per_batch = [len(t) for t in text]
         assert max(num_per_batch) == min(num_per_batch), "Batch sequence lengths must match"
 
         tokens = self.forward_tokenizer(text)
 
-        # Forward pass through the ALIGN model
+        # Forward pass through ALIGN model
         outputs = self.model(**tokens)
         hidden_states = outputs.last_hidden_state
 
-        # Extract CLS token embeddings
-        cls_embeddings = hidden_states[:, 0, :]  # CLS token embedding
-        normalized_embeddings = nn.functional.normalize(cls_embeddings, p=2, dim=-1)
+        # Debugging shape
+        print(f"Hidden state shape: {hidden_states.shape}")
+
+        # CLS token embeddings and normalization
+        cls_embeddings = hidden_states[:, 0, :]  # CLS token
+        cls_embeddings = F.normalize(cls_embeddings, p=2, dim=-1)
+
+        # Apply projection layer for dimensionality adjustment
+        projected_embeddings = self.projection(cls_embeddings)
+
+        # Debugging shape
+        print(f"Projected embeddings shape: {projected_embeddings.shape}")
 
         # Reshape embeddings back to batch format
-        reshaped_embeddings = normalized_embeddings.view(-1, num_per_batch[0], normalized_embeddings.size(-1))
+        reshaped_embeddings = projected_embeddings.view(-1, num_per_batch[0], projected_embeddings.size(-1))
         return reshaped_embeddings
 
     def _freeze_modules(self):
