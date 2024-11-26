@@ -9,7 +9,7 @@ from mmyolo.registry import MODELS
 from mmdet.utils import OptMultiConfig, ConfigType
 from transformers import (AutoTokenizer, AutoModel, CLIPTextConfig, AutoModelForMaskedLM, AutoTokenizer, CLIPTextModel, RobertaModel)
 from transformers import CLIPTextModelWithProjection as CLIPTP
-from transformers import AutoTokenizer, AutoModel, BeitConfig, BeitModel, XLMRobertaTokenizer
+from transformers import AutoTokenizer, AutoModel, BeitConfig, BeitModel, XLMRobertaTokenizer, AlignTextConfig, AlignTextModel
 from typing import List, Sequence
 
 
@@ -126,6 +126,176 @@ class HuggingCLIPLanguageBackbone(BaseModule):
         super().train(mode)
         self._freeze_modules()
 
+@MODELS.register_module()
+class HuggingALIGNLanguageBackbone(BaseModule):
+    def __init__(self,
+                 model_name: str,
+                 frozen_modules: Sequence[str] = (),
+                 dropout: float = 0.0,
+                 training_use_cache: bool = False,
+                 init_cfg: OptMultiConfig = None) -> None:
+        super().__init__(init_cfg=init_cfg)
+
+        self.frozen_modules = frozen_modules
+        self.training_use_cache = training_use_cache
+        
+        # self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # clip_config = CLIPTextConfig.from_pretrained(model_name,
+        #                                              attention_dropout=dropout)
+        # self.model = CLIPTP.from_pretrained(model_name, config=clip_config)
+        # self._freeze_modules()
+
+        # Initialize ALIGN Tokenizer and Model (Assuming ALIGN model supports text input)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        align_config = AlignTextConfig.from_pretrained(model_name,
+                                                      attention_dropout=dropout)
+        self.model = AlignTextModel.from_pretrained(model_name, config=align_config)
+
+        # Fusion layer to combine the embeddings from the model
+        self.fusion_layer = nn.Linear(
+            self.model.config.hidden_size,
+            self.model.config.hidden_size
+        )
+        self._freeze_modules()
+
+    def forward_tokenizer(self, texts: List[List[str]]):
+        """Tokenizes the input text using the ALIGN tokenizer."""
+        flat_text = list(itertools.chain(*texts))
+        tokens = self.tokenizer(
+            text=flat_text,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=512  # Adjust as per memory constraints
+        )
+        return tokens.to(self.model.device)
+
+    def forward(self, text: List[List[str]]) -> Tensor:
+        """Encodes the text using ALIGN and extracts embeddings."""
+        num_per_batch = [len(t) for t in text]
+        assert max(num_per_batch) == min(num_per_batch), "Batch sequence lengths must match"
+
+        tokens = self.forward_tokenizer(text)
+
+        # Forward pass through the ALIGN model
+        outputs = self.model(**tokens)
+        hidden_states = outputs.last_hidden_state
+
+        # Extract CLS token embeddings
+        cls_embeddings = hidden_states[:, 0, :]  # CLS token embedding
+        normalized_embeddings = nn.functional.normalize(cls_embeddings, p=2, dim=-1)
+
+        # Reshape embeddings back to batch format
+        reshaped_embeddings = normalized_embeddings.view(-1, num_per_batch[0], normalized_embeddings.size(-1))
+        return reshaped_embeddings
+
+    def _freeze_modules(self):
+        """Freezes specific or all modules of the model."""
+        if len(self.frozen_modules) == 0:
+            return
+
+        if self.frozen_modules[0] == "all":
+            self.model.eval()
+            for _, param in self.model.named_parameters():
+                param.requires_grad = False
+            return
+
+        # Freeze specified modules
+        for name, module in self.model.named_modules():
+            for frozen_name in self.frozen_modules:
+                if name.startswith(frozen_name):
+                    module.eval()
+                    for param in module.parameters():
+                        param.requires_grad = False
+                    break
+
+    def train(self, mode=True):
+        """Ensures frozen modules remain frozen during training."""
+        super().train(mode)
+        self._freeze_modules()
+
+@MODELS.register_module()
+class HuggingQwenLanguageBackbone(BaseModule):
+    def __init__(self,
+                 model_name: str,
+                 frozen_modules: Sequence[str] = (),
+                 dropout: float = 0.0,
+                 training_use_cache: bool = False,
+                 init_cfg: OptMultiConfig = None) -> None:
+
+        super().__init__(init_cfg=init_cfg)
+
+        self.frozen_modules = frozen_modules
+        self.training_use_cache = training_use_cache
+
+        # Initialize tokenizer and model specific to Qwen1.5-0.5B
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(
+            model_name,
+            output_hidden_states=True,  # Ensure hidden states are available
+            output_attentions=False,    # Disable attention outputs unless needed
+        )
+
+        self._freeze_modules()
+
+    def forward_tokenizer(self, texts):
+        """Tokenizes the input texts for the model."""
+        flat_text = list(itertools.chain(*texts))
+        tokens = self.tokenizer(
+            text=flat_text,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=512,  # Adjust as per memory constraints
+        )
+        return tokens.to(device=self.model.device)
+
+    def forward(self, text: List[List[str]]) -> Tensor:
+        """Encodes text using Qwen1.5-0.5B and extracts embeddings."""
+        num_per_batch = [len(t) for t in text]
+        assert max(num_per_batch) == min(num_per_batch), (
+            "Number of sequences must be equal in each batch."
+        )
+
+        tokens = self.forward_tokenizer(text)
+
+        # Forward pass through the Qwen1.5-0.5B model
+        outputs = self.model(**tokens)
+        hidden_states = outputs.hidden_states[-1]  # Use the last hidden state
+
+        # Extract CLS token embeddings and normalize
+        cls_embeddings = hidden_states[:, 0, :]  # CLS token
+        normalized_embeddings = F.normalize(cls_embeddings, p=2, dim=-1)
+
+        # Reshape embeddings back to batch format
+        reshaped_embeddings = normalized_embeddings.view(-1, num_per_batch[0], normalized_embeddings.size(-1))
+        return reshaped_embeddings
+
+    def _freeze_modules(self):
+        """Freezes specific or all modules of the model."""
+        if len(self.frozen_modules) == 0:
+            return
+
+        if self.frozen_modules[0] == "all":
+            self.model.eval()
+            for _, param in self.model.named_parameters():
+                param.requires_grad = False
+            return
+
+        # Freeze specific submodules
+        for name, module in self.model.named_modules():
+            for frozen_name in self.frozen_modules:
+                if name.startswith(frozen_name):
+                    module.eval()
+                    for param in module.parameters():
+                        param.requires_grad = False
+                    break
+
+    def train(self, mode=True):
+        """Ensures frozen modules remain frozen during training."""
+        super().train(mode)
+        self._freeze_modules()
+    
 @MODELS.register_module()
 class EnhancedTextCLIPBackbone(BaseModule):
     def __init__(self,
