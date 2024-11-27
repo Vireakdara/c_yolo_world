@@ -624,7 +624,7 @@ class HuggingSBERTLanguageBackbone(nn.Module):
 
         # Correctly initialize the fusion layer to match the SBERT output size
         self.hidden_size = self.model.config.hidden_size
-        self.fusion_layer = nn.Linear(self.hidden_size, 256)  # Output size must match downstream expectations
+        self.fusion_layer = nn.Linear(self.hidden_size, 256)  # Match downstream expectations
 
         # Freeze specified modules if necessary
         self._freeze_modules()
@@ -668,11 +668,15 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         txt_feats = self.fusion_layer(txt_feats)
         print(f"Shape after fusion layer: {txt_feats.shape}")  # Should be [batch_size, 256]
 
-        # Reshape to match input batch structure
-        txt_feats = txt_feats.view(-1, num_per_batch[0], txt_feats.size(-1))
-        print(f"Shape after reshaping: {txt_feats.shape}")  # Should match [batch_size, num_sequences, 256]
+        # Reshape for compatibility if needed
+        reshaped_feats = txt_feats.view(-1, num_per_batch[0], txt_feats.size(-1))
+        print(f"Shape after reshaping: {reshaped_feats.shape}")  # Should be [batch_size, num_sequences, 256]
 
-        return txt_feats
+        # Flatten reshaped_feats for downstream compatibility
+        flat_feats = reshaped_feats.view(-1, txt_feats.size(-1))
+        print(f"Shape after flattening: {flat_feats.shape}")  # [batch_size * num_sequences, 256]
+
+        return flat_feats
 
     def _freeze_modules(self):
         """Freezes specified modules of the model."""
