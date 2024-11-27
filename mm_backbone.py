@@ -610,74 +610,53 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         self.frozen_modules = frozen_modules
         self.training_use_cache = training_use_cache
         
-        # Initialize the tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        
-        # Load the SBERT model
         self.model = AutoModel.from_pretrained(model_name)
         
-        # Set dropout if supported by the model's configuration
         if hasattr(self.model.config, 'attention_probs_dropout_prob'):
             self.model.config.attention_probs_dropout_prob = dropout
         if hasattr(self.model.config, 'hidden_dropout_prob'):
             self.model.config.hidden_dropout_prob = dropout
+
+        self.hidden_size = self.model.config.hidden_size  # Typically 384 for SBERT
+        self.fusion_layer = nn.Linear(self.hidden_size, 256)  # Output size is 256
         
-        # Correctly initialize the fusion layer to match the SBERT output size
-        self.hidden_size = self.model.config.hidden_size
-        self.fusion_layer = nn.Linear(self.hidden_size, self.hidden_size)  # Match SBERT hidden size
-        
-        # Freeze specified modules if necessary
         self._freeze_modules()
 
     def forward_tokenizer(self, texts: List[List[str]]):
-        """Tokenizes input text."""
         flat_text = list(itertools.chain(*texts))
         tokens = self.tokenizer(
-            text=flat_text, 
-            return_tensors='pt', 
-            padding=True, 
-            truncation=True, 
-            max_length=512  # Ensure compatibility with model constraints
+            text=flat_text,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=512
         )
-        return tokens.to(self.model.device)
+        return tokens.to(next(self.model.parameters()).device)
 
     def forward(self, text: List[List[str]]) -> torch.Tensor:
-        """Processes the text and outputs normalized embeddings."""
-        # Ensure equal sequence lengths in the batch
         num_per_batch = [len(t) for t in text]
-        assert max(num_per_batch) == min(num_per_batch), "Number of sequences per batch must be equal"
-        
-        # Tokenize the input text
+        assert max(num_per_batch) == min(num_per_batch), "Number of sequences per batch must match"
+
         tokens = self.forward_tokenizer(text)
-        
-        # Pass tokens through the model to get outputs
         outputs = self.model(**tokens)
-        
-        # Use mean pooling for sentence embeddings
         hidden_states = outputs.last_hidden_state
         txt_feats = hidden_states.mean(dim=1)
-        
-        # Normalize the embeddings
         txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
         
-        # Pass through the fusion layer
-        txt_feats = self.fusion_layer(txt_feats)
-        
-        # Reshape to match input batch structure
+        txt_feats = self.fusion_layer(txt_feats)  # Pass through fusion layer
         txt_feats = txt_feats.view(-1, num_per_batch[0], txt_feats.size(-1))
         return txt_feats
 
     def _freeze_modules(self):
-        """Freezes specified modules of the model."""
         if len(self.frozen_modules) == 0:
             return
-        
+
         if self.frozen_modules[0] == "all":
             for param in self.model.parameters():
                 param.requires_grad = False
             return
 
-        # Freeze specific modules
         for name, module in self.model.named_modules():
             for frozen_name in self.frozen_modules:
                 if name.startswith(frozen_name):
@@ -686,7 +665,6 @@ class HuggingSBERTLanguageBackbone(nn.Module):
                     break
 
     def train(self, mode=True):
-        """Ensures frozen modules remain frozen during training."""
         super().train(mode)
         self._freeze_modules()
 
