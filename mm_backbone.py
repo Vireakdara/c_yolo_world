@@ -677,7 +677,8 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         print(f"Shape after flattening: {flat_feats.shape}")  # [total_sequences, 256]
 
         # Truncate or reshape to match downstream expectations
-        required_size = 512  # Adjust based on the downstream model
+        # Ensure `flat_feats` matches downstream expectations
+        required_size = 512  # Set as required by downstream model
         if flat_feats.size(0) > required_size:
             flat_feats = flat_feats[:required_size]  # Select the first `required_size` sequences
         elif flat_feats.size(0) < required_size:
@@ -685,7 +686,11 @@ class HuggingSBERTLanguageBackbone(nn.Module):
                                 device=flat_feats.device)
             flat_feats = torch.cat([flat_feats, padding], dim=0)
 
-        print(f"Final shape for downstream: {flat_feats.shape}")  # Should be [512, 256]
+        # If downstream requires [256, 512] or [512, 256], handle accordingly
+        # Uncomment as needed:
+        # flat_feats = flat_feats.T  # Transpose only if required by downstream
+
+        print(f"Final shape for downstream: {flat_feats.shape}")  # Debugging dimensions
         return flat_feats
 
     def _freeze_modules(self):
