@@ -610,78 +610,72 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         self.frozen_modules = frozen_modules
         self.training_use_cache = training_use_cache
 
-        # Initialize tokenizer and SBERT model
+        # Initialize the tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        # Load the SBERT model
         self.model = AutoModel.from_pretrained(model_name)
 
-        # Set dropout if supported
+        # Set dropout if supported by the model's configuration
         if hasattr(self.model.config, 'attention_probs_dropout_prob'):
             self.model.config.attention_probs_dropout_prob = dropout
         if hasattr(self.model.config, 'hidden_dropout_prob'):
             self.model.config.hidden_dropout_prob = dropout
 
-        # Define dimensions
-        self.hidden_size = self.model.config.hidden_size  # SBERT hidden size
-        self.output_size = 256  # Desired output size
+        # Correctly initialize the fusion layer to match the SBERT output size
+        self.hidden_size = self.model.config.hidden_size
+        self.fusion_layer = nn.Linear(self.hidden_size, 256)  # Output size must match downstream expectations
 
-        # Fusion layer to map embeddings to desired output size
-        self.fusion_layer = nn.Linear(self.hidden_size, self.output_size)
-
-
-        # Freeze specific layers if required
+        # Freeze specified modules if necessary
         self._freeze_modules()
 
     def forward_tokenizer(self, texts: List[List[str]]):
         """Tokenizes input text."""
         flat_text = list(itertools.chain(*texts))
         tokens = self.tokenizer(
-            text=flat_text,
-            return_tensors='pt',
-            padding=True,
-            truncation=True,
+            text=flat_text, 
+            return_tensors='pt', 
+            padding=True, 
+            truncation=True, 
             max_length=512  # Ensure compatibility with model constraints
         )
-        return tokens.to(next(self.model.parameters()).device)
+        return tokens.to(self.model.device)
 
     def forward(self, text: List[List[str]]) -> torch.Tensor:
-        """Processes the input text and returns normalized embeddings."""
-        # Ensure equal sequence lengths per batch
+        """Processes the text and outputs normalized embeddings."""
+        # Ensure equal sequence lengths in the batch
         num_per_batch = [len(t) for t in text]
-        assert max(num_per_batch) == min(num_per_batch), "Number of sequences per batch must match"
-        batch_size = len(text)
+        assert max(num_per_batch) == min(num_per_batch), "Number of sequences per batch must be equal"
 
         # Tokenize the input text
         tokens = self.forward_tokenizer(text)
 
-        # Pass tokens through SBERT model
+        # Pass tokens through the model to get outputs
         outputs = self.model(**tokens)
-        hidden_states = outputs.last_hidden_state  # Shape: (batch_size * num_sentences, seq_len, hidden_size)
 
-        # Pooling (mean pooling for sentence embeddings)
-        txt_feats = hidden_states.mean(dim=1)  # Shape: (batch_size * num_sentences, hidden_size)
-        print(f"Shape after pooling: {txt_feats.shape}")
+        # Debugging: Check hidden states
+        hidden_states = outputs.last_hidden_state
+        print(f"Shape of hidden_states: {hidden_states.shape}")  # Should be [batch_size, seq_len, hidden_size]
 
-        # Normalize embeddings
+        # Use mean pooling for sentence embeddings
+        txt_feats = hidden_states.mean(dim=1)  # Pooling along the sequence length
+        print(f"Shape after pooling: {txt_feats.shape}")  # Should be [batch_size, hidden_size]
+
+        # Normalize the embeddings
         txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
 
-        # Pass through fusion layer
-        txt_feats = self.fusion_layer(txt_feats)  # Shape: (batch_size * num_sentences, output_size)
-        print(f"Shape after fusion layer: {txt_feats.shape}")
+        # Pass through the fusion layer
+        txt_feats = self.fusion_layer(txt_feats)
+        print(f"Shape after fusion layer: {txt_feats.shape}")  # Should be [batch_size, 256]
 
         # Reshape to match input batch structure
-        txt_feats = txt_feats.view(batch_size, num_per_batch[0], self.output_size)
-        print(f"Shape after reshaping: {txt_feats.shape}")
-
-        print(f"Shape of tokens.input_ids: {tokens.input_ids.shape}")
-        print(f"Shape of hidden_states: {hidden_states.shape}")
-        print(f"Shape after pooling: {txt_feats.shape}")
-        print(f"Shape after fusion layer: {txt_feats.shape}")
-        print(f"Shape after reshaping: {txt_feats.shape}")
+        txt_feats = txt_feats.view(-1, num_per_batch[0], txt_feats.size(-1))
+        print(f"Shape after reshaping: {txt_feats.shape}")  # Should match [batch_size, num_sequences, 256]
 
         return txt_feats
 
     def _freeze_modules(self):
-        """Freezes specific modules."""
+        """Freezes specified modules of the model."""
         if len(self.frozen_modules) == 0:
             return
 
