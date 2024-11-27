@@ -601,7 +601,6 @@ class MultiModalYOLOBackbone(BaseModule):
 ## SBERT MODEL TEST IN PROGRESS
 @MODELS.register_module()
 class HuggingSBERTLanguageBackbone(nn.Module):
-
     def __init__(self,
                  model_name: str,
                  frozen_modules: Sequence[str] = (),
@@ -610,48 +609,68 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         super().__init__()
         self.frozen_modules = frozen_modules
         self.training_use_cache = training_use_cache
+        
+        # Initialize the tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         
         # Load the SBERT model
         self.model = AutoModel.from_pretrained(model_name)
         
-        # Set dropout if required (might be model-specific)
+        # Set dropout if supported by the model's configuration
         if hasattr(self.model.config, 'attention_probs_dropout_prob'):
             self.model.config.attention_probs_dropout_prob = dropout
         if hasattr(self.model.config, 'hidden_dropout_prob'):
             self.model.config.hidden_dropout_prob = dropout
-
-        # Freeze specified modules
+        
+        # Use the model's hidden size to set the dimensions for the fusion layer
+        hidden_size = self.model.config.hidden_size
+        self.fusion_layer = nn.Linear(hidden_size, hidden_size)
+        
+        # Freeze specified modules if necessary
         self._freeze_modules()
 
-    def forward_tokenizer(self, texts: List[str]):
-        if not hasattr(self, 'text'):
-            text = list(itertools.chain(*texts))
-            text = self.tokenizer(text=text, return_tensors='pt', padding=True, truncation=True)
-            self.text = text.to(device=self.model.device)
-        return self.text
+    def forward_tokenizer(self, texts: List[List[str]]):
+        """Tokenizes input text."""
+        flat_text = list(itertools.chain(*texts))
+        tokens = self.tokenizer(
+            text=flat_text, 
+            return_tensors='pt', 
+            padding=True, 
+            truncation=True, 
+            max_length=512  # Ensure compatibility with model constraints
+        )
+        return tokens.to(self.model.device)
 
-    def forward(self, text: List[List[str]]) -> Tensor:
-        # Check for consistent number of sentences per batch
+    def forward(self, text: List[List[str]]) -> torch.Tensor:
+        """Processes the text and outputs normalized embeddings."""
+        # Ensure equal sequence lengths in the batch
         num_per_batch = [len(t) for t in text]
         assert max(num_per_batch) == min(num_per_batch), (
-            'number of sequences not equal in batch')
+            "Number of sequences per batch must be equal"
+        )
         
-        # Tokenize and encode
-        text = list(itertools.chain(*text))
-        text = self.tokenizer(text=text, return_tensors='pt', padding=True, truncation=True)
-        text = text.to(device=self.model.device)
+        # Tokenize the input text
+        tokens = self.forward_tokenizer(text)
         
-        # Get embeddings from SBERT model
-        outputs = self.model(**text)
-        txt_feats = outputs.last_hidden_state.mean(dim=1)  # Use mean pooling for embeddings
-        txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)  # Normalize embeddings
+        # Pass tokens through the model to get outputs
+        outputs = self.model(**tokens)
+        
+        # Use mean pooling for sentence embeddings
+        hidden_states = outputs.last_hidden_state
+        txt_feats = hidden_states.mean(dim=1)
+        
+        # Normalize the embeddings
+        txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
+        
+        # Pass through the fusion layer (if necessary)
+        txt_feats = self.fusion_layer(txt_feats)
         
         # Reshape to match input batch structure
-        txt_feats = txt_feats.reshape(-1, num_per_batch[0], txt_feats.shape[-1])
+        txt_feats = txt_feats.view(-1, num_per_batch[0], txt_feats.size(-1))
         return txt_feats
 
     def _freeze_modules(self):
+        """Freezes specified modules of the model."""
         if len(self.frozen_modules) == 0:
             return
         
@@ -660,6 +679,7 @@ class HuggingSBERTLanguageBackbone(nn.Module):
                 param.requires_grad = False
             return
 
+        # Freeze specific modules
         for name, module in self.model.named_modules():
             for frozen_name in self.frozen_modules:
                 if name.startswith(frozen_name):
@@ -668,6 +688,7 @@ class HuggingSBERTLanguageBackbone(nn.Module):
                     break
 
     def train(self, mode=True):
+        """Ensures frozen modules remain frozen during training."""
         super().train(mode)
         self._freeze_modules()
 
