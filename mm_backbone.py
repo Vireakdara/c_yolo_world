@@ -624,7 +624,7 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         
         # Correctly initialize the fusion layer to match the SBERT output size
         self.hidden_size = self.model.config.hidden_size
-        self.fusion_layer = nn.Linear(self.hidden_size, self.hidden_size)
+        self.fusion_layer = nn.Linear(self.hidden_size, self.hidden_size)  # Match SBERT hidden size
         
         # Freeze specified modules if necessary
         self._freeze_modules()
