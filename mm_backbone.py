@@ -614,31 +614,32 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name)
 
-        # Adjust dropout if supported
+        # Set dropout if supported
         if hasattr(self.model.config, 'attention_probs_dropout_prob'):
             self.model.config.attention_probs_dropout_prob = dropout
         if hasattr(self.model.config, 'hidden_dropout_prob'):
             self.model.config.hidden_dropout_prob = dropout
 
         # Define dimensions
-        self.hidden_size = self.model.config.hidden_size  # Typically 384 for SBERT
-        self.output_size = 256  # Adjust this based on downstream requirements
+        self.hidden_size = self.model.config.hidden_size  # SBERT hidden size
+        self.output_size = 256  # Desired output size
 
-        # Fusion layer to reduce dimensionality
+        # Fusion layer to map embeddings to desired output size
         self.fusion_layer = nn.Linear(self.hidden_size, self.output_size)
+
 
         # Freeze specific layers if required
         self._freeze_modules()
 
     def forward_tokenizer(self, texts: List[List[str]]):
-        """Tokenizes the input text."""
+        """Tokenizes input text."""
         flat_text = list(itertools.chain(*texts))
         tokens = self.tokenizer(
             text=flat_text,
             return_tensors='pt',
             padding=True,
             truncation=True,
-            max_length=512
+            max_length=512  # Ensure compatibility with model constraints
         )
         return tokens.to(next(self.model.parameters()).device)
 
@@ -646,27 +647,37 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         """Processes the input text and returns normalized embeddings."""
         # Ensure equal sequence lengths per batch
         num_per_batch = [len(t) for t in text]
-        assert max(num_per_batch) == min(num_per_batch), "Batch sequence lengths must match"
+        assert max(num_per_batch) == min(num_per_batch), "Number of sequences per batch must match"
         batch_size = len(text)
 
-        # Tokenize input
+        # Tokenize the input text
         tokens = self.forward_tokenizer(text)
 
         # Pass tokens through SBERT model
         outputs = self.model(**tokens)
-        hidden_states = outputs.last_hidden_state
+        hidden_states = outputs.last_hidden_state  # Shape: (batch_size * num_sentences, seq_len, hidden_size)
 
         # Pooling (mean pooling for sentence embeddings)
-        txt_feats = hidden_states.mean(dim=1)
+        txt_feats = hidden_states.mean(dim=1)  # Shape: (batch_size * num_sentences, hidden_size)
+        print(f"Shape after pooling: {txt_feats.shape}")
 
         # Normalize embeddings
         txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
 
         # Pass through fusion layer
-        txt_feats = self.fusion_layer(txt_feats)
+        txt_feats = self.fusion_layer(txt_feats)  # Shape: (batch_size * num_sentences, output_size)
+        print(f"Shape after fusion layer: {txt_feats.shape}")
 
         # Reshape to match input batch structure
         txt_feats = txt_feats.view(batch_size, num_per_batch[0], self.output_size)
+        print(f"Shape after reshaping: {txt_feats.shape}")
+
+        print(f"Shape of tokens.input_ids: {tokens.input_ids.shape}")
+        print(f"Shape of hidden_states: {hidden_states.shape}")
+        print(f"Shape after pooling: {txt_feats.shape}")
+        print(f"Shape after fusion layer: {txt_feats.shape}")
+        print(f"Shape after reshaping: {txt_feats.shape}")
+
         return txt_feats
 
     def _freeze_modules(self):
@@ -679,6 +690,7 @@ class HuggingSBERTLanguageBackbone(nn.Module):
                 param.requires_grad = False
             return
 
+        # Freeze specific modules
         for name, module in self.model.named_modules():
             for frozen_name in self.frozen_modules:
                 if name.startswith(frozen_name):
