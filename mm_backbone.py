@@ -622,9 +622,9 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         if hasattr(self.model.config, 'hidden_dropout_prob'):
             self.model.config.hidden_dropout_prob = dropout
         
-        # Use the model's hidden size to set the dimensions for the fusion layer
-        hidden_size = self.model.config.hidden_size
-        self.fusion_layer = nn.Linear(hidden_size, hidden_size)
+        # Correctly initialize the fusion layer to match the SBERT output size
+        self.hidden_size = self.model.config.hidden_size
+        self.fusion_layer = nn.Linear(self.hidden_size, self.hidden_size)
         
         # Freeze specified modules if necessary
         self._freeze_modules()
@@ -645,9 +645,7 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         """Processes the text and outputs normalized embeddings."""
         # Ensure equal sequence lengths in the batch
         num_per_batch = [len(t) for t in text]
-        assert max(num_per_batch) == min(num_per_batch), (
-            "Number of sequences per batch must be equal"
-        )
+        assert max(num_per_batch) == min(num_per_batch), "Number of sequences per batch must be equal"
         
         # Tokenize the input text
         tokens = self.forward_tokenizer(text)
@@ -662,7 +660,7 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         # Normalize the embeddings
         txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
         
-        # Pass through the fusion layer (if necessary)
+        # Pass through the fusion layer
         txt_feats = self.fusion_layer(txt_feats)
         
         # Reshape to match input batch structure
