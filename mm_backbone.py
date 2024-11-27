@@ -672,10 +672,20 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         reshaped_feats = txt_feats.view(-1, num_per_batch[0], txt_feats.size(-1))
         print(f"Shape after reshaping: {reshaped_feats.shape}")  # Should be [batch_size, num_sequences, 256]
 
-        # Flatten reshaped_feats for downstream compatibility
+        # Flatten reshaped_feats
         flat_feats = reshaped_feats.view(-1, txt_feats.size(-1))
-        print(f"Shape after flattening: {flat_feats.shape}")  # [batch_size * num_sequences, 256]
+        print(f"Shape after flattening: {flat_feats.shape}")  # [total_sequences, 256]
 
+        # Truncate or reshape to match downstream expectations
+        required_size = 512  # Adjust based on the downstream model
+        if flat_feats.size(0) > required_size:
+            flat_feats = flat_feats[:required_size]  # Select the first `required_size` sequences
+        elif flat_feats.size(0) < required_size:
+            padding = torch.zeros((required_size - flat_feats.size(0), flat_feats.size(1)),
+                                device=flat_feats.device)
+            flat_feats = torch.cat([flat_feats, padding], dim=0)
+
+        print(f"Final shape for downstream: {flat_feats.shape}")  # Should be [512, 256]
         return flat_feats
 
     def _freeze_modules(self):
