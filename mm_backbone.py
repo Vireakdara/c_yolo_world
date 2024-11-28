@@ -6,10 +6,11 @@ from torch import Tensor, nn
 from torch.nn.modules.batchnorm import _BatchNorm
 from mmengine.model import BaseModule
 from mmyolo.registry import MODELS
+import torch.nn.functional as F
 from mmdet.utils import OptMultiConfig, ConfigType
 from transformers import (AutoTokenizer, AutoModel, CLIPTextConfig, AutoModelForMaskedLM, AutoTokenizer, CLIPTextModel, RobertaModel)
 from transformers import CLIPTextModelWithProjection as CLIPTP
-from transformers import AutoTokenizer, AutoModel, BeitConfig, BeitModel, XLMRobertaTokenizer, AlignTextConfig, AlignTextModel
+from transformers import AutoTokenizer, AutoModel, BeitConfig, BeitModel, XLMRobertaTokenizer, AlignTextConfig, AlignTextModel, AltCLIPTextModel , AltCLIPTextConfig
 from typing import List, Sequence
 
 
@@ -72,10 +73,17 @@ class HuggingCLIPLanguageBackbone(BaseModule):
 
         self.frozen_modules = frozen_modules
         self.training_use_cache = training_use_cache
+
+        # self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # clip_config = CLIPTextConfig.from_pretrained(model_name,
+        #                                              attention_dropout=dropout)
+        # self.model = CLIPTP.from_pretrained(model_name, config=clip_config)
+
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        clip_config = CLIPTextConfig.from_pretrained(model_name,
+        clip_config = AltCLIPTextConfig.from_pretrained(model_name,
                                                      attention_dropout=dropout)
-        self.model = CLIPTP.from_pretrained(model_name, config=clip_config)
+        self.model = AltCLIPTextModel.from_pretrained(model_name, config=clip_config)
+
         self._freeze_modules()
 
     def forward_tokenizer(self, texts):
@@ -641,6 +649,12 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         )
         return tokens.to(self.model.device)
 
+    def mean_pooling(self, model_output, attention_mask):
+        """Mean pooling - take attention mask into account for correct averaging."""
+        token_embeddings = model_output[0]  # First element of model_output contains all token embeddings
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        return torch.sum(token_embeddings * input_mask_expanded, dim=1) / torch.clamp(input_mask_expanded.sum(dim=1), min=1e-9)
+
     def forward(self, text: List[List[str]]) -> torch.Tensor:
         """Processes the text and outputs normalized embeddings."""
         # Ensure equal sequence lengths in the batch
@@ -651,34 +665,34 @@ class HuggingSBERTLanguageBackbone(nn.Module):
         tokens = self.forward_tokenizer(text)
 
         # Pass tokens through the model to get outputs
-        outputs = self.model(**tokens)
+        with torch.no_grad():
+            model_output = self.model(**tokens)
 
         # Debugging: Check hidden states
-        hidden_states = outputs.last_hidden_state
-        print(f"Shape of hidden_states: {hidden_states.shape}")  # Should be [batch_size, seq_len, hidden_size]
+        print(f"Shape of token embeddings (model_output[0]): {model_output[0].shape}")  # Should be [batch_size, seq_len, hidden_size]
 
-        # Use mean pooling for sentence embeddings
-        txt_feats = hidden_states.mean(dim=1)  # Pooling along the sequence length
-        print(f"Shape after pooling: {txt_feats.shape}")  # Should be [batch_size, hidden_size]
+        # Perform mean pooling
+        sentence_embeddings = self.mean_pooling(model_output, tokens['attention_mask'])
+        print(f"Shape after pooling: {sentence_embeddings.shape}")  # Should be [batch_size, hidden_size]
 
         # Normalize the embeddings
-        txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
+        sentence_embeddings = F.normalize(sentence_embeddings, p=2, dim=1)
+        print(f"Shape after normalization: {sentence_embeddings.shape}")  # Should be [batch_size, hidden_size]
 
         # Pass through the fusion layer
-        txt_feats = self.fusion_layer(txt_feats)
-        print(f"Shape after fusion layer: {txt_feats.shape}")  # Should be [batch_size, 256]
+        fused_embeddings = self.fusion_layer(sentence_embeddings)
+        print(f"Shape after fusion layer: {fused_embeddings.shape}")  # Should be [batch_size, 256]
 
         # Reshape for compatibility if needed
-        reshaped_feats = txt_feats.view(-1, num_per_batch[0], txt_feats.size(-1))
+        reshaped_feats = fused_embeddings.view(-1, num_per_batch[0], fused_embeddings.size(-1))
         print(f"Shape after reshaping: {reshaped_feats.shape}")  # Should be [batch_size, num_sequences, 256]
 
         # Flatten reshaped_feats
-        flat_feats = reshaped_feats.view(-1, txt_feats.size(-1))
+        flat_feats = reshaped_feats.view(-1, fused_embeddings.size(-1))
         print(f"Shape after flattening: {flat_feats.shape}")  # [total_sequences, 256]
 
-        # Truncate or reshape to match downstream expectations
-        # Ensure `flat_feats` matches downstream expectations
-        required_size = 512  # Set as required by downstream model
+        # Ensure compatibility with downstream requirements
+        required_size = 512  # Adjust based on the downstream model
         if flat_feats.size(0) > required_size:
             flat_feats = flat_feats[:required_size]  # Select the first `required_size` sequences
         elif flat_feats.size(0) < required_size:
@@ -686,11 +700,13 @@ class HuggingSBERTLanguageBackbone(nn.Module):
                                 device=flat_feats.device)
             flat_feats = torch.cat([flat_feats, padding], dim=0)
 
-        # If downstream requires [256, 512] or [512, 256], handle accordingly
-        # Uncomment as needed:
-        # flat_feats = flat_feats.T  # Transpose only if required by downstream
+        # After ensuring `flat_feats` is `[512, 256]`
+        print(f"Final shapes for downstream: {flat_feats.shape}")  # Should be [512, 256]
 
-        print(f"Final shape for downstream: {flat_feats.shape}")  # Debugging dimensions
+        # Downstream layer compatibility
+        # If downstream expects [256, 512], transpose the input
+        flat_feats = flat_feats.T  # Transpose to [256, 512] if required
+        print(f"Final shape after transpose: {flat_feats.shape}")  # Verify dimensions
         return flat_feats
 
     def _freeze_modules(self):
