@@ -130,59 +130,82 @@ class HuggingCLIPLanguageBackbone(BaseModule):
         self._freeze_modules()
 
 @MODELS.register_module()
-class HuggingAltCLIPLanguageBackbone(nn.Module):
+class HuggingAltCLIPLanguageBackbone(BaseModule):
     def __init__(self,
                  model_name: str,
                  frozen_modules: Sequence[str] = (),
                  dropout: float = 0.0,
+                 target_hidden_size: int = 512,  # For downstream tasks
                  training_use_cache: bool = False) -> None:
         super().__init__()
 
         self.frozen_modules = frozen_modules
         self.training_use_cache = training_use_cache
 
-        # Load AltCLIP tokenizer and model
+        # Initialize tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        config = AltCLIPTextConfig.from_pretrained(model_name, attention_dropout=dropout)
-        self.model = AltCLIPTextModel.from_pretrained(model_name, config=config)
+        self.config = AltCLIPTextConfig.from_pretrained(
+            model_name,
+            attention_dropout=dropout
+        )
+        self.model = AltCLIPTextModel.from_pretrained(model_name, config=self.config)
 
-        # Apply module freezing if specified
+        # Add a projection layer for dimensionality adjustment
+        self.projection = nn.Linear(self.config.hidden_size, target_hidden_size)
+
+        # Optional fusion layer for specific downstream tasks
+        self.fusion_layer = nn.Linear(target_hidden_size, target_hidden_size)
+
+        # Apply module freezing if needed
         self._freeze_modules()
 
-    def forward_tokenizer(self, texts: List[List[str]]):
-        """Tokenizes input texts, ensuring consistent structure."""
+    def forward_tokenizer(self, texts: List[List[str]]) -> Dict[str, Tensor]:
+        """Tokenizes input texts."""
         flat_text = list(itertools.chain(*texts))
-        tokenized = self.tokenizer(
+        tokens = self.tokenizer(
             text=flat_text,
             return_tensors="pt",
             padding=True,
             truncation=True,
             max_length=512
         )
-        return tokenized.to(self.model.device)
+        return tokens.to(self.model.device)
 
     def forward(self, text: List[List[str]]) -> Tensor:
-        """Process input text and return normalized text embeddings."""
+        """Processes input texts and returns embeddings."""
         num_per_batch = [len(t) for t in text]
         assert max(num_per_batch) == min(num_per_batch), (
-            "Number of sequences per batch must be equal.")
+            "Number of sequences per batch must be equal."
+        )
 
         # Tokenize text inputs
         tokens = self.forward_tokenizer(text)
 
-        # Pass tokens through the model
+        # Forward pass through AltCLIP model
         outputs = self.model(**tokens)
-        txt_feats = outputs.last_hidden_state.mean(dim=1)  # Mean pooling
+        hidden_states = outputs.last_hidden_state
 
-        # Normalize embeddings
-        txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
+        # Debugging shapes
+        print(f"Hidden state shape: {hidden_states.shape}")
 
-        # Reshape to match batch structure
-        txt_feats = txt_feats.view(-1, num_per_batch[0], txt_feats.size(-1))
-        return txt_feats
+        # CLS token embeddings and normalization
+        cls_embeddings = hidden_states[:, 0, :]  # CLS token
+        cls_embeddings = F.normalize(cls_embeddings, p=2, dim=-1)
+
+        # Apply projection layer for dimensionality adjustment
+        projected_embeddings = self.projection(cls_embeddings)
+
+        # Debugging shapes
+        print(f"Projected embeddings shape: {projected_embeddings.shape}")
+
+        # Reshape embeddings back to batch structure
+        reshaped_embeddings = projected_embeddings.view(
+            -1, num_per_batch[0], projected_embeddings.size(-1)
+        )
+        return reshaped_embeddings
 
     def _freeze_modules(self):
-        """Freezes specified modules of the model."""
+        """Freezes specific or all modules of the model."""
         if not self.frozen_modules:
             return  # No modules to freeze
 
@@ -191,6 +214,7 @@ class HuggingAltCLIPLanguageBackbone(nn.Module):
                 param.requires_grad = False
             return
 
+        # Freeze specified modules
         for name, module in self.model.named_modules():
             if any(name.startswith(fm) for fm in self.frozen_modules):
                 for param in module.parameters():
@@ -200,7 +224,7 @@ class HuggingAltCLIPLanguageBackbone(nn.Module):
         """Ensures frozen modules remain frozen during training."""
         super().train(mode)
         self._freeze_modules()
-
+        
 @MODELS.register_module()
 class HuggingALIGNLanguageBackbone(BaseModule):
     def __init__(self,
