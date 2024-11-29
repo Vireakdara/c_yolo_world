@@ -11,7 +11,8 @@ from mmdet.utils import OptMultiConfig, ConfigType
 from transformers import (AutoTokenizer, AutoModel, CLIPTextConfig, AutoModelForMaskedLM, AutoTokenizer, CLIPTextModel, RobertaModel)
 from transformers import CLIPTextModelWithProjection as CLIPTP
 from transformers import AutoTokenizer, AutoModel, BeitConfig, BeitModel, XLMRobertaTokenizer, AlignTextConfig, AlignTextModel, AltCLIPTextModel , AltCLIPTextConfig
-from typing import List, Sequence
+from typing import List, Sequence, Dict
+
 
 
 @MODELS.register_module()
@@ -172,24 +173,21 @@ class HuggingAltCLIPLanguageBackbone(BaseModule):
         return tokens.to(self.model.device)
 
     def forward(self, text: List[List[str]]) -> Tensor:
-        """Processes input texts and returns embeddings."""
+        """Encodes text and processes embeddings."""
         num_per_batch = [len(t) for t in text]
-        assert max(num_per_batch) == min(num_per_batch), (
-            "Number of sequences per batch must be equal."
-        )
+        assert max(num_per_batch) == min(num_per_batch), "Batch sequence lengths must match."
 
-        # Tokenize text inputs
         tokens = self.forward_tokenizer(text)
 
-        # Forward pass through AltCLIP model
+        # Forward pass through the model
         outputs = self.model(**tokens)
         hidden_states = outputs.last_hidden_state
 
         # Debugging shapes
-        print(f"Hidden state shape: {hidden_states.shape}")
+        print(f"Hidden states shape: {hidden_states.shape}")
 
         # CLS token embeddings and normalization
-        cls_embeddings = hidden_states[:, 0, :]  # CLS token
+        cls_embeddings = hidden_states[:, 0, :]  # Use the CLS token for simplicity
         cls_embeddings = F.normalize(cls_embeddings, p=2, dim=-1)
 
         # Apply projection layer for dimensionality adjustment
@@ -199,9 +197,7 @@ class HuggingAltCLIPLanguageBackbone(BaseModule):
         print(f"Projected embeddings shape: {projected_embeddings.shape}")
 
         # Reshape embeddings back to batch structure
-        reshaped_embeddings = projected_embeddings.view(
-            -1, num_per_batch[0], projected_embeddings.size(-1)
-        )
+        reshaped_embeddings = projected_embeddings.view(-1, num_per_batch[0], projected_embeddings.size(-1))
         return reshaped_embeddings
 
     def _freeze_modules(self):
@@ -224,7 +220,7 @@ class HuggingAltCLIPLanguageBackbone(BaseModule):
         """Ensures frozen modules remain frozen during training."""
         super().train(mode)
         self._freeze_modules()
-        
+
 @MODELS.register_module()
 class HuggingALIGNLanguageBackbone(BaseModule):
     def __init__(self,
