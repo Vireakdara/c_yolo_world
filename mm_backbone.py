@@ -173,36 +173,22 @@ class HuggingAltCLIPLanguageBackbone(BaseModule):
         return tokens.to(self.model.device)
 
     def forward(self, text: List[List[str]]) -> Tensor:
-        """Encodes text and processes embeddings."""
-        num_per_batch = [len(t) for t in text]
-        assert max(num_per_batch) == min(num_per_batch), "Batch sequence lengths must match."
-
         tokens = self.forward_tokenizer(text)
 
         # Forward pass through the model
         outputs = self.model(**tokens)
         hidden_states = outputs.last_hidden_state  # Shape: [batch_size * num_per_batch, seq_len, hidden_size]
 
-        # Debugging shape
-        print(f"Hidden states shape: {hidden_states.shape}")
+        # Use CLS token embeddings
+        cls_embeddings = hidden_states[:, 0, :]  # Shape: [batch_size * num_per_batch, hidden_size]
 
-        # Pool the sequence dimension (choose one method)
-        cls_embeddings = hidden_states[:, 0, :]  # Use CLS token (Shape: [1280, 768])
-        # Alternatively: mean pooling
-        # cls_embeddings = hidden_states.mean(dim=1)  # Shape: [1280, 768]
-
-        # Normalize the embeddings
+        # Normalize embeddings
         cls_embeddings = F.normalize(cls_embeddings, p=2, dim=-1)
 
-        # Apply projection layer for dimensionality adjustment
-        projected_embeddings = self.projection(cls_embeddings)  # Shape: [1280, target_hidden_size]
+        # Apply projection layer
+        projected_embeddings = self.projection(cls_embeddings)  # Ensure input size matches hidden_size
 
-        # Debugging shape
-        print(f"Projected embeddings shape: {projected_embeddings.shape}")
-
-        # Reshape embeddings back to batch structure
-        reshaped_embeddings = projected_embeddings.view(-1, num_per_batch[0], projected_embeddings.size(-1))
-        return reshaped_embeddings
+        return projected_embeddings
 
 
     def _freeze_modules(self):
