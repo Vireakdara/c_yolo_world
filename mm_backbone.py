@@ -181,24 +181,29 @@ class HuggingAltCLIPLanguageBackbone(BaseModule):
 
         # Forward pass through the model
         outputs = self.model(**tokens)
-        hidden_states = outputs.last_hidden_state
+        hidden_states = outputs.last_hidden_state  # Shape: [batch_size * num_per_batch, seq_len, hidden_size]
 
-        # Debugging shapes
+        # Debugging shape
         print(f"Hidden states shape: {hidden_states.shape}")
 
-        # CLS token embeddings and normalization
-        cls_embeddings = hidden_states[:, 0, :]  # Use the CLS token for simplicity
+        # Pool the sequence dimension (choose one method)
+        cls_embeddings = hidden_states[:, 0, :]  # Use CLS token (Shape: [1280, 768])
+        # Alternatively: mean pooling
+        # cls_embeddings = hidden_states.mean(dim=1)  # Shape: [1280, 768]
+
+        # Normalize the embeddings
         cls_embeddings = F.normalize(cls_embeddings, p=2, dim=-1)
 
         # Apply projection layer for dimensionality adjustment
-        projected_embeddings = self.projection(cls_embeddings)
+        projected_embeddings = self.projection(cls_embeddings)  # Shape: [1280, target_hidden_size]
 
-        # Debugging shapes
+        # Debugging shape
         print(f"Projected embeddings shape: {projected_embeddings.shape}")
 
         # Reshape embeddings back to batch structure
         reshaped_embeddings = projected_embeddings.view(-1, num_per_batch[0], projected_embeddings.size(-1))
         return reshaped_embeddings
+
 
     def _freeze_modules(self):
         """Freezes specific or all modules of the model."""
