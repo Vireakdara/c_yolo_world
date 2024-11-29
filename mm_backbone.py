@@ -131,12 +131,13 @@ class HuggingCLIPLanguageBackbone(BaseModule):
         self._freeze_modules()
 
 @MODELS.register_module()
-class HuggingAltCLIPLanguageBackbone(BaseModule):
+class HuggingAltCLIPLanguageBackboneWithPrompts(BaseModule):
     def __init__(self,
                  model_name: str,
                  frozen_modules: Sequence[str] = (),
                  dropout: float = 0.0,
                  target_hidden_size: int = 512,  # For downstream tasks
+                 prompt_length: int = 5,  # Number of soft prompt tokens
                  training_use_cache: bool = False) -> None:
         super().__init__()
 
@@ -149,7 +150,13 @@ class HuggingAltCLIPLanguageBackbone(BaseModule):
             model_name,
             attention_dropout=dropout
         )
+        self.config.hidden_size = 768  # Explicitly set hidden size if necessary
         self.model = AltCLIPTextModel.from_pretrained(model_name, config=self.config)
+
+        # Add a trainable soft prompt embedding layer
+        self.soft_prompt_embeddings = nn.Parameter(
+            torch.randn(prompt_length, self.config.hidden_size)  # Initialize randomly
+        )
 
         # Add a projection layer for dimensionality adjustment
         self.projection = nn.Linear(self.config.hidden_size, target_hidden_size)
@@ -161,7 +168,7 @@ class HuggingAltCLIPLanguageBackbone(BaseModule):
         self._freeze_modules()
 
     def forward_tokenizer(self, texts: List[List[str]]) -> Dict[str, Tensor]:
-        """Tokenizes input texts."""
+        """Tokenizes input texts and prepends soft prompts."""
         flat_text = list(itertools.chain(*texts))
         tokens = self.tokenizer(
             text=flat_text,
@@ -175,21 +182,38 @@ class HuggingAltCLIPLanguageBackbone(BaseModule):
     def forward(self, text: List[List[str]]) -> Tensor:
         tokens = self.forward_tokenizer(text)
 
-        # Forward pass through the model
-        outputs = self.model(**tokens)
-        hidden_states = outputs.last_hidden_state  # Shape: [batch_size * num_per_batch, seq_len, hidden_size]
+        # Extract input embeddings
+        input_embeddings = self.model.get_input_embeddings()(tokens.input_ids)  # Shape: [batch_size, seq_len, hidden_size]
+
+        # Add soft prompts to the input embeddings
+        batch_size = input_embeddings.size(0)
+        soft_prompts = self.soft_prompt_embeddings.unsqueeze(0).expand(batch_size, -1, -1)  # Shape: [batch_size, prompt_len, hidden_size]
+        input_embeddings = torch.cat([soft_prompts, input_embeddings], dim=1)  # Concatenate prompts
+
+        # Adjust attention mask for the added prompts
+        attention_mask = tokens.attention_mask
+        prompt_mask = torch.ones(batch_size, self.soft_prompt_embeddings.size(0), device=attention_mask.device)
+        attention_mask = torch.cat([prompt_mask, attention_mask], dim=1)
+
+        # Forward pass through the AltCLIP model
+        outputs = self.model(inputs_embeds=input_embeddings, attention_mask=attention_mask)
+        hidden_states = outputs.last_hidden_state  # Shape: [batch_size, seq_len + prompt_len, hidden_size]
+
+        # Debugging shape
+        print(f"Hidden states shape: {hidden_states.shape}")
 
         # Use CLS token embeddings
-        cls_embeddings = hidden_states[:, 0, :]  # Shape: [batch_size * num_per_batch, hidden_size]
+        cls_embeddings = hidden_states[:, 0, :]  # Shape: [batch_size, hidden_size]
+        print(f"CLS embeddings shape: {cls_embeddings.shape}")
 
         # Normalize embeddings
         cls_embeddings = F.normalize(cls_embeddings, p=2, dim=-1)
 
         # Apply projection layer
-        projected_embeddings = self.projection(cls_embeddings)  # Ensure input size matches hidden_size
+        projected_embeddings = self.projection(cls_embeddings)  # Shape: [batch_size, target_hidden_size]
+        print(f"Projected embeddings shape: {projected_embeddings.shape}")
 
         return projected_embeddings
-
 
     def _freeze_modules(self):
         """Freezes specific or all modules of the model."""
@@ -211,7 +235,7 @@ class HuggingAltCLIPLanguageBackbone(BaseModule):
         """Ensures frozen modules remain frozen during training."""
         super().train(mode)
         self._freeze_modules()
-
+        
 @MODELS.register_module()
 class HuggingALIGNLanguageBackbone(BaseModule):
     def __init__(self,
