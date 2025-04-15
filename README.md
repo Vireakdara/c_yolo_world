@@ -1,4 +1,4 @@
-## YOLO-World YOLO9
+## YOLO-World YOLOv9
 
 | model | Schedule  | `mask-refine` | efficient neck |  AP | AP<sub>50</sub> | AP<sub>75</sub> | weights | log35 |
 | :---- | :-------: | :----------: |:-------------:  | :-: | :--------------:| :-------------: |:------: | :-: |
